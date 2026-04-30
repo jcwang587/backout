@@ -126,6 +126,14 @@ def save_email(date_str, sender, subject, body, con=None):
 
     base = f"{dt.strftime('%Y-%m-%d_%H%M')}_{safe_filename(subject)}"
     filepath = os.path.join(folder, f"{base}.txt")
+
+    # file already on disk but not in DB (e.g. from a pre-DB backup run) — just register it
+    if os.path.exists(filepath):
+        record_backup(con, hash_val, dt.strftime("%Y-%m-%d %H:%M"), sender, subject, filepath)
+        if close_after:
+            con.close()
+        return True
+
     counter = 2
     while os.path.exists(filepath):
         filepath = os.path.join(folder, f"{base}_{counter}.txt")
