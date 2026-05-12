@@ -5,7 +5,7 @@ import time
 from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from utils import BASE_DIR, init_db, save_email, get_stats
+from utils import init_db, save_email, get_stats
 
 
 def run(cmd, **kwargs):
@@ -26,6 +26,7 @@ def quit_outlook():
 
 
 def set_outlook_mode(new_outlook: bool):
+    # EnableNewOutlook is the preference Outlook actually uses to choose the UI.
     enable_value = "2" if new_outlook else "0"
     running_value = "true" if new_outlook else "false"
     commands = [
@@ -113,24 +114,7 @@ def wait_for_outlook_ready(timeout=90):
 
 def request_outlook_sync():
     result = run(["osascript", "-e", 'tell application "Microsoft Outlook" to sync'], timeout=30)
-    script_sync_requested = result.returncode == 0
-
-    # Cmd-K is Outlook's Send & Receive shortcut in Legacy Outlook.
-    # macOS may block this unless Terminal/Cursor has Accessibility permission.
-    result = run(["osascript", "-e", """
-tell application "Microsoft Outlook" to activate
-delay 1
-tell application "System Events"
-    tell process "Microsoft Outlook"
-        keystroke "k" using command down
-    end tell
-end tell
-"""], timeout=30)
-    shortcut_requested = result.returncode == 0
-    if not shortcut_requested:
-        print(" UI refresh shortcut blocked by macOS Accessibility permissions", end="", flush=True)
-
-    return script_sync_requested or shortcut_requested
+    return result.returncode == 0
 
 
 def sync_outlook(timeout=120, settle_time=15):
