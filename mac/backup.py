@@ -2,13 +2,22 @@ import subprocess
 import sys
 import os
 import time
+from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from utils import BASE_DIR, init_db, save_email, get_stats
 
 
 def run(cmd, **kwargs):
-    return subprocess.run(cmd, capture_output=True, text=True, **kwargs)
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, **kwargs)
+    except subprocess.TimeoutExpired as exc:
+        return subprocess.CompletedProcess(
+            cmd,
+            124,
+            stdout=exc.stdout or "",
+            stderr=exc.stderr or "Command timed out",
+        )
 
 
 def quit_outlook():
@@ -17,31 +26,84 @@ def quit_outlook():
 
 
 def set_outlook_mode(new_outlook: bool):
-    value = "1" if new_outlook else "0"
-    run(["defaults", "write", "com.microsoft.Outlook", "IsRunningNewOutlook", "-bool", value])
+    enable_value = "2" if new_outlook else "0"
+    running_value = "true" if new_outlook else "false"
+    commands = [
+        ["defaults", "write", "com.microsoft.Outlook", "EnableNewOutlook", "-int", enable_value],
+        ["defaults", "write", "com.microsoft.Outlook", "IsRunningNewOutlook", "-bool", running_value],
+        ["defaults", "write", "com.microsoft.Outlook", "RunningNewOutlook", "-bool", running_value],
+    ]
+    for cmd in commands:
+        result = run(cmd)
+        if result.returncode != 0:
+            raise RuntimeError(f"Could not switch Outlook mode: {result.stderr.strip()}")
 
 
 def open_outlook():
     run(["open", "-a", "Microsoft Outlook"])
 
 
+def inbox_snapshot():
+    script = """
+tell application "Microsoft Outlook"
+    set totalCount to 0
+    set inboxCount to 0
+    set currentMonthCount to 0
+    set newestDate to missing value
+    set nowDate to current date
+    set allFolders to every mail folder
+    repeat with f in allFolders
+        if (name of f is "Inbox") then
+            set inboxCount to inboxCount + 1
+            set folderMessages to messages of f
+            set totalCount to totalCount + (count of folderMessages)
+            repeat with m in folderMessages
+                set msgDate to missing value
+                try
+                    set msgDate to time received of m
+                on error
+                    try
+                        set msgDate to time sent of m
+                    end try
+                end try
+                if msgDate is not missing value then
+                    if newestDate is missing value or msgDate > newestDate then
+                        set newestDate to msgDate
+                    end if
+                    if ((year of msgDate) is (year of nowDate)) and ((month of msgDate) is (month of nowDate)) then
+                        set currentMonthCount to currentMonthCount + 1
+                    end if
+                end if
+            end repeat
+        end if
+    end repeat
+    set newestText to "none"
+    if newestDate is not missing value then set newestText to newestDate as string
+    return (totalCount as string) & "|" & (inboxCount as string) & "|" & (currentMonthCount as string) & "|" & newestText
+end tell
+"""
+    result = run(["osascript", "-e", script])
+    if result.returncode != 0:
+        return {"total": 0, "inboxes": 0, "current_month": 0, "newest": "none"}
+    try:
+        total, inboxes, current_month, newest = result.stdout.strip().split("|", 3)
+        return {
+            "total": int(total),
+            "inboxes": int(inboxes),
+            "current_month": int(current_month),
+            "newest": newest,
+        }
+    except ValueError:
+        return {"total": 0, "inboxes": 0, "current_month": 0, "newest": "none"}
+
+
 def wait_for_outlook_ready(timeout=90):
     print("Waiting for Legacy Outlook to load", end="", flush=True)
     start = time.time()
     while time.time() - start < timeout:
-        result = run(["osascript", "-e", """
-            tell application "Microsoft Outlook"
-                set allFolders to every mail folder
-                repeat with f in allFolders
-                    if (name of f is "Inbox") and ((count of messages of f) > 0) then
-                        return count of messages of f
-                    end if
-                end repeat
-                return 0
-            end tell
-        """])
-        if result.returncode == 0 and result.stdout.strip().isdigit() and int(result.stdout.strip()) > 0:
-            print(f" ready ({result.stdout.strip()} emails).")
+        snapshot = inbox_snapshot()
+        if snapshot["total"] > 0:
+            print(f" ready ({snapshot['total']} emails across {snapshot['inboxes']} Inbox folder(s)).")
             return True
         print(".", end="", flush=True)
         time.sleep(5)
@@ -49,35 +111,94 @@ def wait_for_outlook_ready(timeout=90):
     return False
 
 
+def request_outlook_sync():
+    result = run(["osascript", "-e", 'tell application "Microsoft Outlook" to sync'], timeout=30)
+    script_sync_requested = result.returncode == 0
+
+    # Cmd-K is Outlook's Send & Receive shortcut in Legacy Outlook.
+    # macOS may block this unless Terminal/Cursor has Accessibility permission.
+    result = run(["osascript", "-e", """
+tell application "Microsoft Outlook" to activate
+delay 1
+tell application "System Events"
+    tell process "Microsoft Outlook"
+        keystroke "k" using command down
+    end tell
+end tell
+"""], timeout=30)
+    shortcut_requested = result.returncode == 0
+    if not shortcut_requested:
+        print(" UI refresh shortcut blocked by macOS Accessibility permissions", end="", flush=True)
+
+    return script_sync_requested or shortcut_requested
+
+
+def sync_outlook(timeout=120, settle_time=15):
+    print("Syncing emails", end="", flush=True)
+    if not request_outlook_sync():
+        print(" could not request sync; continuing with currently visible emails.")
+        return inbox_snapshot()
+
+    start = time.time()
+    last_snapshot = inbox_snapshot()
+    last_change = time.time()
+    while time.time() - start < timeout:
+        print(".", end="", flush=True)
+        time.sleep(5)
+        snapshot = inbox_snapshot()
+        if snapshot != last_snapshot:
+            last_snapshot = snapshot
+            last_change = time.time()
+        elif time.time() - last_change >= settle_time:
+            break
+
+    print(f" done ({last_snapshot['total']} emails across {last_snapshot['inboxes']} Inbox folder(s)).")
+    return last_snapshot
+
+
 def backup_inbox():
     script = """
 tell application "Microsoft Outlook"
     set output to ""
     set allFolders to every mail folder
-    set inboxFolder to missing value
     repeat with f in allFolders
         if (name of f is "Inbox") and ((count of messages of f) > 0) then
-            set inboxFolder to f
-            exit repeat
+            set msgs to messages of f
+            repeat with m in msgs
+                set msgDate to (time sent of m) as string
+
+                try
+                    set msgSubject to subject of m
+                on error
+                    set msgSubject to "(no subject)"
+                end try
+                if msgSubject is missing value then set msgSubject to "(no subject)"
+
+                try
+                    set msgBody to plain text content of m
+                on error
+                    set msgBody to ""
+                end try
+                if msgBody is missing value then set msgBody to ""
+
+                set sAddr to ""
+                set sName to "(unknown sender)"
+                try
+                    set msgSender to sender of m
+                    set sAddr to address of msgSender
+                    set sName to sAddr
+                    try
+                        set sName to name of msgSender
+                    end try
+                end try
+
+                set output to output & "%%DATE%%:" & msgDate & "\n"
+                set output to output & "%%FROM%%:" & sName & " <" & sAddr & ">\n"
+                set output to output & "%%SUBJECT%%:" & msgSubject & "\n"
+                set output to output & "%%BODY%%:" & msgBody & "\n"
+                set output to output & "%%END%%\n"
+            end repeat
         end if
-    end repeat
-    if inboxFolder is missing value then return "ERROR: inbox not found"
-    set msgs to messages of inboxFolder
-    repeat with m in msgs
-        set msgDate to (time sent of m) as string
-        set msgSubject to subject of m
-        set msgBody to plain text content of m
-        set msgSender to sender of m
-        set sAddr to address of msgSender
-        set sName to sAddr
-        try
-            set sName to name of msgSender
-        end try
-        set output to output & "%%DATE%%:" & msgDate & "\n"
-        set output to output & "%%FROM%%:" & sName & " <" & sAddr & ">\n"
-        set output to output & "%%SUBJECT%%:" & msgSubject & "\n"
-        set output to output & "%%BODY%%:" & msgBody & "\n"
-        set output to output & "%%END%%\n"
     end repeat
     return output
 end tell
@@ -108,6 +229,15 @@ end tell
 
     print(f"New: {saved}  |  Already backed up: {already_exists}  |  Skipped: {skipped}")
 
+    snapshot = inbox_snapshot()
+    if snapshot["current_month"] == 0:
+        current_month = datetime.now().strftime("%Y-%m")
+        print(
+            f"Warning: Legacy Outlook did not expose any {current_month} Inbox messages "
+            f"(newest visible: {snapshot['newest']}). "
+            "If you see May mail in New Outlook, manually refresh/sync Legacy Outlook, then run this again."
+        )
+
 
 print("=== Outlook Email Backup (Mac) ===")
 
@@ -123,7 +253,8 @@ if not wait_for_outlook_ready():
     open_outlook()
     exit(1)
 
-print("Step 2: Backing up emails...")
+print("Step 2: Syncing and backing up emails...")
+sync_outlook()
 backup_inbox()
 
 print("Step 3: Switching back to New Outlook...")
