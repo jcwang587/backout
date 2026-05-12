@@ -104,7 +104,7 @@ def wait_for_outlook_ready(timeout=90):
     while time.time() - start < timeout:
         snapshot = inbox_snapshot()
         if snapshot["total"] > 0:
-            print(f" ready ({snapshot['total']} emails across {snapshot['inboxes']} Inbox folder(s)).")
+            print(f" ready ({snapshot['total']} emails).")
             return True
         print(".", end="", flush=True)
         time.sleep(5)
@@ -136,7 +136,7 @@ def sync_outlook(timeout=120, settle_time=15):
         elif time.time() - last_change >= settle_time:
             break
 
-    print(f" done ({last_snapshot['total']} emails across {last_snapshot['inboxes']} Inbox folder(s)).")
+    print(f" done ({last_snapshot['total']} emails).")
     return last_snapshot
 
 
