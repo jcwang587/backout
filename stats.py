@@ -1,7 +1,11 @@
 import sys
 from utils import get_stats
 
-year  = sys.argv[1] if len(sys.argv) > 1 else None
-month = sys.argv[2] if len(sys.argv) > 2 else None
+args = sys.argv[1:]
+show_top_senders = "--top-senders" in args
+args = [arg for arg in args if arg != "--top-senders"]
 
-get_stats(year=year, month=month)
+year  = args[0] if len(args) > 0 else None
+month = args[1] if len(args) > 1 else None
+
+get_stats(year=year, month=month, show_top_senders=show_top_senders)

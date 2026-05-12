@@ -44,7 +44,7 @@ def record_backup(con, hash_val, date_str, sender, subject, filepath):
     con.commit()
 
 
-def get_stats(year=None, month=None):
+def get_stats(year=None, month=None, show_top_senders=False):
     con = sqlite3.connect(DB_PATH)
     filters, params = [], []
 
@@ -65,11 +65,13 @@ def get_stats(year=None, month=None):
         GROUP BY month ORDER BY month DESC
     """, params).fetchall()
 
-    top_senders = con.execute(f"""
-        SELECT sender, COUNT(*) as count
-        FROM emails {where}
-        GROUP BY sender ORDER BY count DESC LIMIT 10
-    """, params).fetchall()
+    top_senders = []
+    if show_top_senders:
+        top_senders = con.execute(f"""
+            SELECT sender, COUNT(*) as count
+            FROM emails {where}
+            GROUP BY sender ORDER BY count DESC LIMIT 10
+        """, params).fetchall()
 
     con.close()
 
@@ -82,9 +84,10 @@ def get_stats(year=None, month=None):
     for m, count in by_month:
         print(f"    {m}  {count} emails")
 
-    print(f"\n  Top senders:")
-    for sender, count in top_senders:
-        print(f"    {count:>4}  {sender}")
+    if show_top_senders:
+        print(f"\n  Top senders:")
+        for sender, count in top_senders:
+            print(f"    {count:>4}  {sender}")
     print(f"{'─' * 50}\n")
 
 
